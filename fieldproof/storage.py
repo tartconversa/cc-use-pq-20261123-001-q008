@@ -83,8 +83,39 @@ CREATE TABLE IF NOT EXISTS bulletin (
     UNIQUE (trial_id, market, evidence_id),
     FOREIGN KEY (trial_id, evidence_id) REFERENCES evidence(trial_id, evidence_id)
 );
-PRAGMA user_version=1;
+CREATE TABLE IF NOT EXISTS monitor (
+    trial_id TEXT NOT NULL,
+    segment_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    unit_id TEXT NOT NULL,
+    delivery_seq INTEGER NOT NULL REFERENCES delivery(seq),
+    segment TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    PRIMARY KEY (trial_id, segment_id, revision),
+    FOREIGN KEY (trial_id, unit_id) REFERENCES enrollment(trial_id, unit_id)
+);
+CREATE INDEX IF NOT EXISTS monitor_cut ON monitor(trial_id, delivery_seq);
+CREATE INDEX IF NOT EXISTS monitor_unit ON monitor(trial_id, unit_id);
+PRAGMA user_version=2;
 """
+
+MIGRATIONS = {
+    2: """
+CREATE TABLE IF NOT EXISTS monitor (
+    trial_id TEXT NOT NULL,
+    segment_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    unit_id TEXT NOT NULL,
+    delivery_seq INTEGER NOT NULL REFERENCES delivery(seq),
+    segment TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    PRIMARY KEY (trial_id, segment_id, revision),
+    FOREIGN KEY (trial_id, unit_id) REFERENCES enrollment(trial_id, unit_id)
+);
+CREATE INDEX IF NOT EXISTS monitor_cut ON monitor(trial_id, delivery_seq);
+CREATE INDEX IF NOT EXISTS monitor_unit ON monitor(trial_id, unit_id);
+""",
+}
 
 
 class Store:
@@ -94,10 +125,14 @@ class Store:
         session = self.connect()
         try:
             version = session.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in range(0, 3):
                 raise RuntimeError(f"Unsupported database version {version}")
             session.execute("PRAGMA journal_mode=WAL")
             session.executescript(SCHEMA)
+            for target, script in sorted(MIGRATIONS.items()):
+                if version < target:
+                    session.executescript(script)
+                    session.execute(f"PRAGMA user_version={target}")
         finally:
             session.close()
 

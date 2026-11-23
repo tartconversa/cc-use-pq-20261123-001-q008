@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse, Response
 from fieldproof.analysis import evidence, influence, reconcile, sensitivity
 from fieldproof.analysis.checks import inspection_queue, readiness_calendar
 from fieldproof.analysis.contrast import estimate
+from fieldproof.analysis.rescue import build_records, market_readout
+from fieldproof.analysis.rescue_reconcile import reconcile_rescue
 from fieldproof.common import Problem, conflict, missing
 from fieldproof.design import registry
 from fieldproof.design.contracts import (
@@ -25,8 +27,8 @@ from fieldproof.design.contracts import (
 )
 from fieldproof.release import bulletins
 from fieldproof.release.contracts import Cut, EvidenceId, FreezeEvidence, IssueBulletin, Review
-from fieldproof.signals import ledger
-from fieldproof.signals.contracts import Delivery
+from fieldproof.signals import ledger, monitoring
+from fieldproof.signals.contracts import Delivery, MonitoringDelivery
 from fieldproof.storage import Store
 
 QueryCut = Annotated[int, Query(ge=0, le=2**63 - 1)]
@@ -54,6 +56,19 @@ class Selection:
 
 
 Selected = Annotated[Selection, Depends(Selection)]
+
+
+def _legacy_rate(trial, material: evidence.Material, market: Key) -> dict:
+    """保留旧试点的二元手动率读取，与首次救场分析并列展示。"""
+    document = evidence.analyze(trial, material)
+    for result in document["market_results"]:
+        if result["market_id"] == market:
+            return {
+                "metric": "manual_cycles_over_usable_cycles",
+                "manual": result["metrics"]["manual"],
+                "recommendation": result["recommendation"],
+            }
+    raise missing("market", market)
 
 
 def create_app(database: str | Path) -> FastAPI:
@@ -142,6 +157,25 @@ def create_app(database: str | Path) -> FastAPI:
             assigned = registry.roster(db, trial_id)
             return ledger.append(db, trial, assigned, body)
 
+    @app.post("/trials/{trial_id}/monitoring")
+    def deliver_monitoring(trial_id: Key, body: MonitoringDelivery):
+        with store.transaction(write=True) as db:
+            trial = registry.get_trial(db, trial_id)
+            assigned = registry.roster(db, trial_id)
+            return monitoring.append(db, trial, assigned, body)
+
+    @app.get("/trials/{trial_id}/monitoring")
+    def read_monitoring(trial_id: Key, cut: QueryCut | None = None):
+        with store.transaction() as db:
+            trial = registry.get_trial(db, trial_id)
+            selected = ledger.current_cut(db, trial_id) if cut is None else cut
+            ledger.require_cut(db, trial_id, selected)
+            segments = monitoring.segments_at(db, trial_id, selected)
+            return {
+                "cut": selected,
+                "segments": [segment.model_dump(mode="json") for segment in segments],
+            }
+
     @app.get("/trials/{trial_id}/events/{event_id}")
     def event_history(trial_id: Key, event_id: Key):
         with store.transaction() as db:
@@ -218,6 +252,35 @@ def create_app(database: str | Path) -> FastAPI:
             trial = registry.get_trial(db, trial_id)
             material = evidence.load(db, trial, pick.window(trial), pick.cut)
             return influence.site_readout(trial, material, market)
+
+    @app.get("/trials/{trial_id}/markets/{market}/rescue-timeline")
+    def rescue_timeline(trial_id: Key, market: Key, pick: Selected):
+        with store.transaction() as db:
+            trial = registry.get_trial(db, trial_id)
+            material = evidence.load(db, trial, pick.window(trial), pick.cut)
+            assigned = registry.roster(db, trial_id)
+            records = build_records(db, trial, assigned, material.cut,
+                                    window=material.window)
+            readout = market_readout(trial, material, records, market)
+            readout["legacy_manual_rate"] = _legacy_rate(trial, material, market)
+            return readout
+
+    @app.get("/trials/{trial_id}/markets/{market}/rescue-reconciliation")
+    def rescue_changes(
+        trial_id: Key,
+        market: Key,
+        before_cut: QueryCut,
+        after_cut: QueryCut,
+        starts_on: date | None = None,
+        ends_before: date | None = None,
+        limit: Limit = 50,
+        offset: Offset = 0,
+    ):
+        with store.transaction() as db:
+            trial = registry.get_trial(db, trial_id)
+            window = evidence.select_window(trial, starts_on, ends_before)
+            return reconcile_rescue(db, trial, window, before_cut, after_cut, market,
+                                    limit=limit, offset=offset)
 
     @app.post("/trials/{trial_id}/evidence")
     def freeze(trial_id: Key, body: FreezeEvidence):

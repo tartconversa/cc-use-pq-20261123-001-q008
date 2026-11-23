@@ -73,6 +73,18 @@ class Policy(Input):
     max_missing_energy_bp: Rate
     max_cycle_seconds: Annotated[StrictInt, Field(ge=60, le=172_800)]
     max_cycle_wh: Annotated[StrictInt, Field(ge=1, le=50_000)]
+    rescue_checkpoints_seconds: list[Annotated[StrictInt, Field(ge=1, le=172_800)]] = Field(
+        default_factory=list, max_length=12
+    )
+
+    @model_validator(mode="after")
+    def rescue_checkpoints(self):
+        points = self.rescue_checkpoints_seconds
+        if len(set(points)) != len(points) or points != sorted(points):
+            raise ValueError("Rescue checkpoints must be unique and ordered ascending")
+        if any(point > self.max_cycle_seconds for point in points):
+            raise ValueError("Rescue checkpoints must lie within the maximum cycle duration")
+        return self
 
 
 class TrialPlan(Input):

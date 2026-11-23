@@ -58,3 +58,40 @@ class Delivery(Input):
         if len(keys) != len(self.events):
             raise ValueError("A delivery cannot contain an event revision twice")
         return self
+
+
+class MonitorSegment(Input):
+    segment_id: Key
+    revision: Revision
+    unit_id: Key
+    online_from: WholeSecond
+    online_until: WholeSecond
+    void: bool = False
+
+    @field_validator("online_from", "online_until")
+    @classmethod
+    def normalize_time(cls, value):
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def ordered_window(self):
+        if self.void and self.revision == 1:
+            raise ValueError("A retraction must revise an existing segment")
+        if self.online_from >= self.online_until:
+            raise ValueError("A monitoring window must end after it begins")
+        return self
+
+    def identity(self) -> tuple[str, str, str]:
+        return self.unit_id, self.segment_id, "monitor"
+
+
+class MonitoringDelivery(Input):
+    delivery_id: Key
+    segments: list[MonitorSegment] = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def unique_revisions(self):
+        keys = {(segment.segment_id, segment.revision) for segment in self.segments}
+        if len(keys) != len(self.segments):
+            raise ValueError("A delivery cannot contain a segment revision twice")
+        return self

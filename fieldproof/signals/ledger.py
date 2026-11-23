@@ -10,8 +10,10 @@ from fieldproof.signals.contracts import Delivery, Event
 
 
 def current_cut(db: Connection, trial_id: str) -> int:
+    # 事实截点跨越信号与监测两类交付，但重放批次不接受新事实，不推进截点
     row = db.execute(
-        "SELECT MAX(delivery_seq) FROM signal WHERE trial_id=?", (trial_id,)
+        "SELECT MAX(seq) FROM delivery WHERE trial_id=? AND accepted > 0",
+        (trial_id,),
     ).fetchone()
     return row[0] or 0
 
@@ -20,7 +22,7 @@ def require_cut(db: Connection, trial_id: str, cut: int):
     if cut == 0:
         return
     row = db.execute(
-        "SELECT 1 FROM signal WHERE trial_id=? AND delivery_seq=? LIMIT 1",
+        "SELECT 1 FROM delivery WHERE trial_id=? AND seq=? AND accepted > 0 LIMIT 1",
         (trial_id, cut),
     ).fetchone()
     if row is None:
